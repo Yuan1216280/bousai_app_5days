@@ -1,20 +1,62 @@
 {% extends "base.html" %}
 
+{% block title %}避難所一覧 | 防災アプリ{% endblock %}
+
 {% block content %}
-<h2>検索結果</h2>
+<style>
+  .results-panel {
+    padding: 24px;
+    border: 1px solid #e5ebf0;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 8px 22px rgba(26, 57, 83, .07);
+  }
 
-{% if results %}
-  <ul>
-    {% for shelter in results %}
-    <li>{{ shelter.name }}</li>
-    {% endfor %}
-  </ul>
-{% else %}
-  <p>該当する避難所が見つかりませんでした</p>
-{% endif %}
+  .results-panel h1 { margin: 0 0 18px; color: #245aa5; font-size: 21px; }
+  .results-list { margin: 0; padding: 0; display: grid; gap: 10px; list-style: none; }
+  .result-item { padding: 15px; border: 1px solid #e5ebf0; border-radius: 6px; }
+  .result-item h2 { margin: 0 0 8px; font-size: 17px; }
+  .result-item dl { margin: 0; display: grid; gap: 4px; color: #607487; font-size: 14px; }
+  .result-item dl div { display: flex; gap: 8px; }
+  .result-item dt { min-width: 76px; font-weight: 700; }
+  .result-item dd { margin: 0; overflow-wrap: anywhere; }
+  .result-status { padding: 3px 9px; border-radius: 999px; background: #edf1f4; color: #5b6872; font-size: 12px; vertical-align: middle; }
+  .result-status.is-open { background: #e6f5ec; color: #187447; }
+  .results-empty { color: #607487; }
+  .results-links { margin: 18px 0 0; display: flex; gap: 16px; }
 
-<p>
-  <a href="/shelter_search">検索画面に戻る</a> |
-  <a href="/">トップページへ戻る</a>
-</p>
+  @media (max-width: 600px) {
+    .results-panel { padding: 18px 14px; }
+    .results-panel h1 { font-size: 19px; }
+  }
+</style>
+
+<section class="results-panel" aria-labelledby="resultsTitle">
+  <h1 id="resultsTitle">避難所一覧</h1>
+  {% if results %}
+    <ul class="results-list">
+      {% for shelter in results %}
+        {% set current_status = shelter.get('status', '未設定') %}
+        <li class="result-item">
+          <h2>{{ shelter.name }}
+            <span class="result-status {% if current_status == '開設中' %}is-open{% endif %}">{{ current_status }}</span>
+          </h2>
+          <dl>
+            <div><dt>住所</dt><dd>{{ shelter.get('address') or '未登録' }}</dd></div>
+            <div><dt>収容人数</dt><dd>{% if shelter.get('capacity') %}{{ shelter.capacity }}人{% else %}未登録{% endif %}</dd></div>
+            <div><dt>対応災害</dt><dd>{% if shelter.get('disaster_types') %}{{ shelter.disaster_types|join('、') }}{% else %}未登録{% endif %}</dd></div>
+            <div><dt>設備</dt><dd>{% if shelter.get('features') %}{{ shelter.features|join('、') }}{% else %}未登録{% endif %}</dd></div>
+          </dl>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="results-empty">該当する避難所が見つかりませんでした。</p>
+  {% endif %}
+
+  <p class="results-links">
+    <a href="/shelter_search">検索画面に戻る</a>
+    <a href="/">トップページへ戻る</a>
+  </p>
+</section>
 {% endblock %}

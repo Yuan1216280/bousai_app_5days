@@ -10,5 +10,45 @@
   {
     "id": 5,
     "name": "鵠洋小学校"
+  },
+  {
+    "id": 6,
+    "name": "aaa"
+  },
+  {
+    "id": 7,
+    "name": "あああ",
+    "address": "aaaaaa",
+    "capacity": 100,
+    "status": "開設中"
+  },
+  {
+    "id": 8,
+    "name": "aaa",
+    "address": "aaaaaa",
+    "capacity": 100,
+    "status": "閉鎖中",
+    "disaster_types": [
+      "地震",
+      "津波"
+    ],
+    "features": [
+      "バリアフリー",
+      "駐車場"
+    ]
+  },
+  {
+    "id": 9,
+    "name": "aaa",
+    "address": "aaaaaa",
+    "capacity": 100,
+    "status": "閉鎖中",
+    "disaster_types": [
+      "地震"
+    ],
+    "features": [
+      "ペット可",
+      "バリアフリー"
+    ]
   }
 ]

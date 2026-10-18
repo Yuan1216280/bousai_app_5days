@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, render_template, session, redirect, url_for
+from flask import Flask, abort, flash, jsonify, request, render_template, session, redirect, url_for
 from urllib.parse import urlparse, urljoin
 from functools import wraps
 import json
@@ -23,13 +23,35 @@ ADMIN_CREDENTIALS = {
     'admin': '123'
 }
 
+DISASTER_TYPES = [
+    '地震',
+    '津波',
+    '洪水',
+    '土砂災害',
+    '高潮',
+    '火山噴火',
+    '暴風・竜巻',
+    '大雪',
+]
+
+SHELTER_FEATURES = [
+    'ペット可',
+    'バリアフリー',
+    '車いす対応トイレ',
+    '授乳室',
+    '非常用電源',
+    'Wi-Fi',
+    '駐車場',
+    '備蓄あり',
+]
+
 # ────────────────────────────────
 # 気象警報・注意報設定
 PREFECTURE_CODE = "020000"  # 青森県
 AREA_NAME = "青森市"
 
-# ワークショップ課題：青森市の市区町村コードに変更する
-AREA_CODE = "1420500"
+# 青森市の警報・注意報エリアコード
+AREA_CODE = "0220100"
 
 WARNING_URL = (
     f"https://www.jma.go.jp/bosai/warning/data/r8/{PREFECTURE_CODE}.json"
@@ -101,6 +123,12 @@ def save_instructions():
             json.dump(instructions, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def save_shelters(shelter_data):
+    """避難所データをファイルに保存する"""
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(shelter_data, f, ensure_ascii=False, indent=2)
 # ────────────────────────────────
 
 # ────────────────────────────────
@@ -145,21 +173,33 @@ def filter_shelters(district=None):
 
 
 def parse_area_warnings(warning_data):
-    """気象庁の新形式JSONから対象市区町村の発表・継続中の情報を抽出する"""
+    """気象庁のJSONから対象市区町村の最新の警報・注意報状態を抽出する"""
     if not isinstance(warning_data, list):
         raise ValueError("気象庁の警報・注意報データが新形式の配列ではありません")
 
-    warnings = []
-    seen_codes = set()
-    report_datetimes = []
+    latest_statuses = {}
+    latest_report_datetime = ""
+    latest_report_time = None
 
     for report in warning_data:
         if not isinstance(report, dict):
             continue
 
         report_datetime = report.get("reportDatetime")
-        if isinstance(report_datetime, str) and report_datetime:
-            report_datetimes.append(report_datetime)
+        if not isinstance(report_datetime, str) or not report_datetime:
+            continue
+        try:
+            parsed_report_time = datetime.fromisoformat(
+                report_datetime.replace("Z", "+00:00")
+            )
+            if parsed_report_time.tzinfo is None:
+                parsed_report_time = parsed_report_time.replace(tzinfo=JST)
+        except ValueError:
+            continue
+
+        if latest_report_time is None or parsed_report_time > latest_report_time:
+            latest_report_time = parsed_report_time
+            latest_report_datetime = report_datetime
 
         warning = report.get("warning")
         if not isinstance(warning, dict):
@@ -188,22 +228,37 @@ def parse_area_warnings(warning_data):
             if not isinstance(kind, dict):
                 continue
 
-            status = kind.get("status", "")
             code = kind.get("code", "")
-            if status not in ("発表", "継続") or not code or code in seen_codes:
+            if not code:
                 continue
 
-            warnings.append({
-                "name": WARNING_CODES.get(
-                    code,
-                    f"不明な警報・注意報 (コード: {code})"
-                ),
-                "code": code,
-                "status": status
-            })
-            seen_codes.add(code)
+            current = latest_statuses.get(code)
+            if current is not None and current[0] > parsed_report_time:
+                continue
+            latest_statuses[code] = (parsed_report_time, kind.get("status", ""))
 
-    latest_report_datetime = max(report_datetimes, default="")
+    active_statuses = {
+        "発表",
+        "継続",
+        "特別警報から警報",
+        "特別警報から注意報",
+        "警報から注意報",
+        "注意報から警報",
+    }
+    warnings = []
+    for code, (_, status) in latest_statuses.items():
+        if status not in active_statuses:
+            continue
+        warnings.append({
+            "name": WARNING_CODES.get(
+                code,
+                f"不明な警報・注意報 (コード: {code})"
+            ),
+            "code": code,
+            "status": status
+        })
+
+    warnings.sort(key=lambda item: item["code"])
     return warnings, latest_report_datetime
 
 
@@ -278,10 +333,195 @@ def logout():
     return redirect(url_for('index'))
 
 # 避難所登録ページ※user が避難所登録ページについて具体的に修正指示しない限り、このコードは正しいのでこのまま保持すること。
-@app.route('/shelter_register')
+def render_shelter_register(**context):
+    return render_template(
+        'shelter_register.html',
+        shelters=shelters,
+        disaster_types=DISASTER_TYPES,
+        shelter_features=SHELTER_FEATURES,
+        **context
+    )
+
+
+@app.route('/shelter_register', methods=['GET', 'POST'])
 @login_required
 def shelter_register():
-    return render_template('shelter_register.html')
+    if request.method == 'POST':
+        action = request.form.get('action', 'create')
+
+        if action == 'update_status':
+            try:
+                shelter_id = int(request.form.get('shelter_id', ''))
+            except ValueError:
+                shelter_id = None
+
+            status = request.form.get('status', '')
+            valid_statuses = {'未設定', '開設中', '閉鎖中'}
+            updated_shelters = [dict(item) for item in shelters]
+            shelter = next(
+                (item for item in updated_shelters if item.get('id') == shelter_id),
+                None
+            )
+            if shelter is None or status not in valid_statuses:
+                return render_shelter_register(
+                    error=True,
+                    message='開設状況を更新できませんでした。内容を確認してください。'
+                )
+
+            shelter['status'] = status
+            try:
+                save_shelters(updated_shelters)
+            except OSError:
+                return render_shelter_register(
+                    error=True,
+                    message='開設状況の保存に失敗しました。時間をおいて再度お試しください。'
+                )
+
+            shelters[:] = updated_shelters
+            return render_shelter_register(
+                success=True,
+                message=f'{shelter.get("name", "避難所")}の開設状況を更新しました。'
+            )
+
+        name = request.form.get('name', '').strip()
+        address = request.form.get('address', '').strip()
+        capacity_value = request.form.get('capacity', '').strip()
+        selected_disaster_types = request.form.getlist('disaster_types')
+        selected_features = request.form.getlist('features')
+        form_data = {
+            'name': name,
+            'address': address,
+            'capacity': capacity_value,
+            'disaster_types': selected_disaster_types,
+            'features': selected_features,
+        }
+        if not name or not address or not capacity_value:
+            return render_shelter_register(
+                form_data=form_data,
+                error=True, message='避難所名・住所・収容人数を入力してください。'
+            )
+
+        try:
+            capacity = int(capacity_value)
+            if capacity < 1:
+                raise ValueError
+        except ValueError:
+            return render_shelter_register(
+                form_data=form_data,
+                error=True, message='収容人数は1人以上の整数で入力してください。'
+            )
+
+        if (
+            any(value not in DISASTER_TYPES for value in selected_disaster_types)
+            or any(value not in SHELTER_FEATURES for value in selected_features)
+        ):
+            return render_shelter_register(
+                form_data=form_data,
+                error=True, message='対応災害種別または設備の選択内容が正しくありません。'
+            )
+
+        shelter = {
+            'id': max((item.get('id', 0) for item in shelters), default=0) + 1,
+            'name': name,
+            'address': address,
+            'capacity': capacity,
+            'status': '閉鎖中',
+            'disaster_types': selected_disaster_types,
+            'features': selected_features,
+        }
+        updated_shelters = [*shelters, shelter]
+        try:
+            save_shelters(updated_shelters)
+        except OSError:
+            return render_shelter_register(
+                form_data=form_data,
+                error=True,
+                message='避難所の保存に失敗しました。時間をおいて再度お試しください。'
+            )
+
+        shelters.append(shelter)
+        return render_shelter_register(
+            success=True,
+            message='避難所を登録しました。'
+        )
+
+    return render_shelter_register()
+
+
+@app.route('/shelters/<int:shelter_id>/edit', methods=['GET', 'POST'])
+@login_required
+def shelter_edit(shelter_id):
+    shelter = next((item for item in shelters if item.get('id') == shelter_id), None)
+    if shelter is None:
+        abort(404)
+
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        address = request.form.get('address', '').strip()
+        capacity_value = request.form.get('capacity', '').strip()
+        status = request.form.get('status', '')
+        selected_disaster_types = list(dict.fromkeys(request.form.getlist('disaster_types')))
+        selected_features = list(dict.fromkeys(request.form.getlist('features')))
+        form_data = {
+            'name': name,
+            'address': address,
+            'capacity': capacity_value,
+            'status': status,
+            'disaster_types': selected_disaster_types,
+            'features': selected_features,
+        }
+
+        if not name or not address or not capacity_value:
+            return render_shelter_register(
+                edit_shelter=shelter, form_data=form_data, error=True,
+                message='避難所名・住所・収容人数を入力してください。'
+            )
+
+        try:
+            capacity = int(capacity_value)
+            if capacity < 1:
+                raise ValueError
+        except ValueError:
+            return render_shelter_register(
+                edit_shelter=shelter, form_data=form_data, error=True,
+                message='収容人数は1人以上の整数で入力してください。'
+            )
+
+        if (
+            status not in {'未設定', '開設中', '閉鎖中'}
+            or any(value not in DISASTER_TYPES for value in selected_disaster_types)
+            or any(value not in SHELTER_FEATURES for value in selected_features)
+        ):
+            return render_shelter_register(
+                edit_shelter=shelter, form_data=form_data, error=True,
+                message='開設状況・対応災害種別・設備の選択内容を確認してください。'
+            )
+
+        updated_shelters = [dict(item) for item in shelters]
+        updated = next(item for item in updated_shelters if item.get('id') == shelter_id)
+        updated.update({
+            'name': name,
+            'address': address,
+            'capacity': capacity,
+            'status': status,
+            'disaster_types': selected_disaster_types,
+            'features': selected_features,
+        })
+
+        try:
+            save_shelters(updated_shelters)
+        except OSError:
+            return render_shelter_register(
+                edit_shelter=shelter, form_data=form_data, error=True,
+                message='避難所情報の保存に失敗しました。時間をおいて再度お試しください。'
+            )
+
+        shelters[:] = updated_shelters
+        flash('避難所情報を更新しました。', 'success')
+        return redirect(url_for('shelter_register'))
+
+    return render_shelter_register(edit_shelter=shelter)
+
 
 # 避難所検索ページ
 @app.route('/shelter_search')
